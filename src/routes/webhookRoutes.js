@@ -98,7 +98,8 @@ async function handleUpdate(update) {
 }
 
 router.post('/webhook/telegram', async (req, res) => {
-  res.status(200).send('OK');
+  res.sendStatus(200); // Responde inmediato a Telegram
+
   try {
     await handleUpdate(req.body);
   } catch (err) {
