@@ -36,9 +36,9 @@ router.post('/chat', async (req, res) => {
  * POST /chat/clear - Limpiar historial de conversación
  * Body: { telegram_id: string }
  */
-router.post('/chat/clear', (req, res) => {
+router.post('/chat/clear', async (req, res) => {
   const { telegram_id } = req.body;
-  if (telegram_id) clearHistory(String(telegram_id));
+  if (telegram_id) await clearHistory(String(telegram_id));
   res.json({ status: 'ok' });
 });
 

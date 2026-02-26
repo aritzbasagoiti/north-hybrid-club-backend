@@ -33,11 +33,22 @@ CREATE TABLE IF NOT EXISTS progress_snapshots (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Tabla chat_messages (memoria persistente para la IA)
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Índices para consultas frecuentes
 CREATE INDEX IF NOT EXISTS idx_training_logs_user_created 
   ON training_logs(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_progress_snapshots_user 
   ON progress_snapshots(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created 
+  ON chat_messages(user_id, created_at);
 
 -- RLS (Row Level Security) - opcional: habilita si necesitas políticas
 -- ALTER TABLE users ENABLE ROW LEVEL SECURITY;

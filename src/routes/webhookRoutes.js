@@ -1,5 +1,5 @@
 const express = require('express');
-const { chat } = require('../services/chatService');
+const { chat, clearHistory } = require('../services/chatService');
 const { getWeeklyReport, getMonthlyReport } = require('../services/reportService');
 
 const router = express.Router();
@@ -58,6 +58,12 @@ async function handleUpdate(update) {
     } catch (err) {
       await sendTelegram(chatId, `❌ Error: ${err.message}`);
     }
+    return;
+  }
+
+  if (text === '/nueva') {
+    await clearHistory(telegramId);
+    await sendTelegram(chatId, '🔄 Conversación reiniciada. ¿En qué puedo ayudarte?');
     return;
   }
 
