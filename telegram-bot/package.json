@@ -1,0 +1,13 @@
+{
+  "name": "north-hybrid-club-telegram-bot",
+  "version": "1.0.0",
+  "description": "Bot de Telegram para NORTH Hybrid Club",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
