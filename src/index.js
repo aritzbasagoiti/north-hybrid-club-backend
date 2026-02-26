@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const trainingRoutes = require('./routes/trainingRoutes');
+const webhookRoutes = require('./routes/webhookRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +15,7 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/', trainingRoutes);
+app.use('/', webhookRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ status: 'error', error: 'Ruta no encontrada' });

@@ -41,6 +41,7 @@ En **Project Settings** → **Environment Variables**, añade:
 | `SUPABASE_URL` | https://gvptazvoftpyhbfrmlfe.supabase.co |
 | `SUPABASE_SERVICE_KEY` | tu Secret key de Supabase |
 | `OPENAI_API_KEY` | tu API key de OpenAI |
+| `TELEGRAM_BOT_TOKEN` | tu token de @BotFather |
 
 ---
 
@@ -54,15 +55,25 @@ https://north-hybrid-club-backend-xxx.vercel.app
 
 ---
 
-## 5. Configurar el bot de Telegram
+## 5. Configurar el webhook de Telegram
 
-En el `.env` del bot, cambia:
+Abre en el navegador (sustituye TU_URL y TU_TOKEN):
 
 ```
-API_BASE_URL=https://tu-url.vercel.app
+https://api.telegram.org/botTU_TOKEN/setWebhook?url=TU_URL/webhook/telegram
 ```
 
-Reinicia el bot. Ya podrás usar el chat con el backend en la nube.
+Ejemplo:
+```
+https://api.telegram.org/bot7123456789:AAHxxx/setWebhook?url=https://north-hybrid-club-backend-xxx.vercel.app/webhook/telegram
+```
+
+O visita desde el navegador:
+```
+https://tu-app.vercel.app/webhook/telegram/setup?url=https://tu-app.vercel.app
+```
+
+Si responde `{"ok":true}` el webhook está activo. **Ya no necesitas ejecutar el bot con polling** – todo funciona desde Vercel.
 
 ---
 
