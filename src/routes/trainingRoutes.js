@@ -5,11 +5,21 @@ const { chat, clearHistory } = require('../services/chatService');
 
 const router = express.Router();
 
+function requireApiKey(req, res, next) {
+  const required = process.env.CHAT_API_KEY;
+  if (!required) return next();
+  const incoming = String(req.headers['x-api-key'] || '');
+  if (!incoming || incoming !== required) {
+    return res.status(401).json({ status: 'error', error: 'No autorizado' });
+  }
+  return next();
+}
+
 /**
  * POST /chat - IA conversacional tipo ChatGPT
  * Body: { telegram_id: string, message: string }
  */
-router.post('/chat', async (req, res) => {
+router.post('/chat', requireApiKey, async (req, res) => {
   try {
     const { telegram_id, message } = req.body;
 
@@ -36,7 +46,7 @@ router.post('/chat', async (req, res) => {
  * POST /chat/clear - Limpiar historial de conversación
  * Body: { telegram_id: string }
  */
-router.post('/chat/clear', async (req, res) => {
+router.post('/chat/clear', requireApiKey, async (req, res) => {
   const { telegram_id } = req.body;
   if (telegram_id) await clearHistory(String(telegram_id));
   res.json({ status: 'ok' });
@@ -46,7 +56,7 @@ router.post('/chat/clear', async (req, res) => {
  * POST /save-training
  * Body: { telegram_id: string, message: string }
  */
-router.post('/save-training', async (req, res) => {
+router.post('/save-training', requireApiKey, async (req, res) => {
   try {
     const { telegram_id, message } = req.body;
 
@@ -85,7 +95,7 @@ router.post('/save-training', async (req, res) => {
 /**
  * GET /weekly-report/:telegram_id
  */
-router.get('/weekly-report/:telegram_id', async (req, res) => {
+router.get('/weekly-report/:telegram_id', requireApiKey, async (req, res) => {
   try {
     const { telegram_id } = req.params;
     if (!telegram_id) {
@@ -114,7 +124,7 @@ router.get('/weekly-report/:telegram_id', async (req, res) => {
 /**
  * GET /monthly-report/:telegram_id
  */
-router.get('/monthly-report/:telegram_id', async (req, res) => {
+router.get('/monthly-report/:telegram_id', requireApiKey, async (req, res) => {
   try {
     const { telegram_id } = req.params;
     if (!telegram_id) {

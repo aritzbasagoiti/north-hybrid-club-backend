@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS user_profile (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Tabla telegram_updates (deduplicación idempotente del webhook)
+-- Telegram puede reenviar updates; guardamos update_id para no reprocesar.
+CREATE TABLE IF NOT EXISTS telegram_updates (
+  update_id BIGINT PRIMARY KEY,
+  telegram_user_id TEXT,
+  chat_id TEXT,
+  message_id BIGINT,
+  received_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Índices para consultas frecuentes
 CREATE INDEX IF NOT EXISTS idx_training_logs_user_created 
   ON training_logs(user_id, created_at);

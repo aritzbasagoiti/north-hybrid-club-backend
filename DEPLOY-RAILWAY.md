@@ -18,6 +18,8 @@ SUPABASE_URL=https://gvptazvoftpyhbfrmlfe.supabase.co
 SUPABASE_SERVICE_KEY=tu-secret-key
 OPENAI_API_KEY=tu-openai-key
 TELEGRAM_BOT_TOKEN=tu-token-botfather
+TELEGRAM_WEBHOOK_SECRET=una-cadena-larga-y-secreta
+CHAT_API_KEY=tu-api-key-opcional
 ```
 
 ## 4. Configurar
@@ -33,15 +35,15 @@ Railway despliega automáticamente al conectar el repo. Espera a que termine.
 - Te dará algo como: `north-hybrid-club-backend-production.up.railway.app`
 
 ## 7. Configurar webhook de Telegram
-Abre en el navegador (sustituye TU_TOKEN y TU_URL):
+Abre en el navegador (recomendado; sustitye TU_URL) para que tu backend haga el `setWebhook` con `secret_token`:
 
 ```
-https://api.telegram.org/botTU_TOKEN/setWebhook?url=https://TU_URL/webhook/telegram
+https://TU_URL/webhook/telegram/setup?url=https://TU_URL
 ```
 
 Ejemplo:
 ```
-https://api.telegram.org/bot123:ABC/setWebhook?url=https://north-hybrid-club-backend-production.up.railway.app/webhook/telegram
+https://north-hybrid-club-backend-production.up.railway.app/webhook/telegram/setup?url=https://north-hybrid-club-backend-production.up.railway.app
 ```
 
 ---

@@ -5,6 +5,49 @@ const cache = {
   text: ''
 };
 
+function normalizeLine(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim();
+}
+
+function pickRelevantClubExcerpt(fullText, message, { maxChars = 3500, maxLines = 40 } = {}) {
+  const msg = (message || '').toLowerCase();
+  const lines = String(fullText || '')
+    .split('\n')
+    .map(normalizeLine)
+    .filter(Boolean);
+
+  if (!lines.length) return '';
+
+  // Palabras clave: mezcla de needsClubInfo + algunas útiles
+  const keywords = [
+    'horario', 'horarios', 'clase', 'clases', 'disciplin', 'hyrox', 'deka', 'ubic', 'direc', 'leioa', 'bizkaia',
+    'precio', 'tarifa', 'membres', 'whatsapp', 'email', 'contact', 'instagram', 'open', 'cerr', 'sábado', 'domingo'
+  ];
+
+  const scored = lines.map((line, idx) => {
+    const l = line.toLowerCase();
+    let score = 0;
+    for (const k of keywords) {
+      if (msg.includes(k) && l.includes(k)) score += 3;
+      else if (l.includes(k)) score += 1;
+    }
+    if (l.includes('€') || l.includes('eur') || l.includes('tel') || l.includes('@')) score += 1;
+    return { idx, line, score };
+  });
+
+  // Si el usuario pregunta por algo concreto, prioriza líneas que compartan keywords.
+  const chosen = scored
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxLines)
+    .sort((a, b) => a.idx - b.idx)
+    .map((x) => x.line);
+
+  // Fallback: si no encontramos nada, devolvemos el inicio (pero recortado)
+  const excerpt = (chosen.length ? chosen : lines.slice(0, maxLines)).join('\n');
+  return excerpt.slice(0, maxChars);
+}
+
 function stripHtmlToText(html) {
   if (!html) return '';
   return html
@@ -109,7 +152,9 @@ async function getClubContextIfNeeded(message) {
   if (!needsClubInfo(message)) return '';
   const text = await getClubInfoText();
   if (!text) return '';
-  return `INFO_CLUB (extraído de la web oficial; úsalo como fuente de verdad):\n${text}\nFIN_INFO_CLUB`;
+  const excerpt = pickRelevantClubExcerpt(text, message);
+  if (!excerpt) return '';
+  return `INFO_CLUB (extracto relevante de la web oficial; úsalo como fuente de verdad):\n${excerpt}\nFIN_INFO_CLUB`;
 }
 
 module.exports = { getClubContextIfNeeded, getClubInfoText, needsClubInfo };

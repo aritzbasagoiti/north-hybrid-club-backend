@@ -1,10 +1,14 @@
 const express = require('express');
 const { chat } = require('../services/chatService');
 const { transcribeAudioBuffer } = require('../services/transcriptionService');
+const { markTelegramUpdateProcessed } = require('../services/telegramDedupService');
+const { logError, logWarn, logInfo, safeErrorMessage } = require('../services/logger');
 
 const router = express.Router();
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+const MAX_AUDIO_BYTES = Number(process.env.TELEGRAM_MAX_AUDIO_BYTES || 20 * 1024 * 1024); // 20MB por defecto
 
 async function fetchWithRetry(url, options, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -23,7 +27,7 @@ async function fetchWithRetry(url, options, retries = 3) {
 
 async function sendTelegram(chatId, text) {
   if (!BOT_TOKEN) return;
-  await fetchWithRetry(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -73,12 +77,27 @@ async function sendTyping(chatId) {
 }
 
 async function handleUpdate(update) {
-  const msg = update.message;
+  const msg = update.message || update.edited_message;
   if (!msg) return;
 
   const chatId = msg.chat.id;
   let text = (msg.text || '').trim();
   const telegramId = String(msg.from?.id || '');
+  const updateId = update.update_id ?? null;
+  const messageId = msg.message_id ?? null;
+
+  // Idempotencia: si ya hemos procesado el update, salimos.
+  try {
+    const shouldProcess = await markTelegramUpdateProcessed({
+      updateId,
+      telegramUserId: telegramId,
+      chatId,
+      messageId
+    });
+    if (!shouldProcess) return;
+  } catch (err) {
+    logWarn('telegram dedup failed; continuing', { updateId, error: safeErrorMessage(err) });
+  }
 
   // Si no hay texto, intentamos transcribir voz (voice / audio / video_note)
   if (!text) {
@@ -86,10 +105,21 @@ async function handleUpdate(update) {
     const voiceFileId = msg.voice?.file_id || msg.audio?.file_id || msg.video_note?.file_id || null;
     if (!voiceFileId) return;
 
+    const audioSize =
+      Number(msg.voice?.file_size || msg.audio?.file_size || msg.video_note?.file_size || 0) || 0;
+    if (audioSize && audioSize > MAX_AUDIO_BYTES) {
+      await sendTelegram(chatId, 'Ese audio es demasiado largo/pesado para transcribirlo. Envíamelo más corto (por ejemplo 30–60s) o escríbelo.');
+      return;
+    }
+
     await sendTyping(chatId);
     try {
       const filePath = await getTelegramFilePath(voiceFileId);
       const buf = await downloadTelegramFileBuffer(filePath);
+      if (buf.length > MAX_AUDIO_BYTES) {
+        await sendTelegram(chatId, 'Ese audio es demasiado pesado para transcribirlo. Envíamelo más corto o escríbelo.');
+        return;
+      }
       const extRaw = (filePath.split('.').pop() || 'ogg').toLowerCase();
       // Telegram voice suele venir como .oga (OGG/OPUS). Forzamos .ogg para que el modelo lo acepte.
       const ext = (extRaw === 'oga' || extRaw === 'opus') ? 'ogg' : extRaw;
@@ -103,6 +133,7 @@ async function handleUpdate(update) {
         return;
       }
     } catch (err) {
+      logWarn('audio transcription failed', { updateId, messageId, error: safeErrorMessage(err) });
       await sendTelegram(chatId, `❌ No pude transcribir el audio: ${err.message}`);
       return;
     }
@@ -118,17 +149,27 @@ async function handleUpdate(update) {
     const reply = await chat(telegramId, text);
     await sendTelegram(chatId, reply || 'No pude generar una respuesta.');
   } catch (err) {
+    logError('chat failed', { updateId, messageId, error: safeErrorMessage(err) });
     await sendTelegram(chatId, `❌ Error: ${err.message}`);
   }
 }
 
 router.post('/webhook/telegram', async (req, res) => {
+  // Protección: secret token (Telegram enviará la cabecera si lo configuras en setWebhook)
+  if (WEBHOOK_SECRET) {
+    const incoming = String(req.headers['x-telegram-bot-api-secret-token'] || '');
+    if (!incoming || incoming !== WEBHOOK_SECRET) {
+      res.sendStatus(401);
+      return;
+    }
+  }
+
   res.sendStatus(200); // Responde inmediato a Telegram
 
   try {
     await handleUpdate(req.body);
   } catch (err) {
-    console.error('Webhook error:', err);
+    logError('webhook error', { error: safeErrorMessage(err) });
   }
 });
 
@@ -145,9 +186,23 @@ router.get('/webhook/telegram/setup', async (req, res) => {
     });
   }
   const webhookUrl = `${baseUrl.replace(/\/$/, '')}/webhook/telegram`;
-  const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
-  const data = await tgRes.json();
-  res.json({ ok: data.ok, webhook_url: webhookUrl, result: data.description || data.result });
+
+  // Recomendado: setWebhook via POST para poder pasar secret_token
+  const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: webhookUrl,
+      secret_token: WEBHOOK_SECRET || undefined
+    })
+  });
+  const data = await tgRes.json().catch(() => ({}));
+  if (data && data.ok === false) {
+    return res.status(400).json({ ok: false, webhook_url: webhookUrl, error: data.description || 'setWebhook failed' });
+  }
+
+  logInfo('telegram webhook set', { webhookUrl, hasSecret: Boolean(WEBHOOK_SECRET) });
+  res.json({ ok: true, webhook_url: webhookUrl, result: data.description || data.result });
 });
 
 module.exports = router;

@@ -5,6 +5,7 @@ const { getOrCreateUser } = require('./userService');
 const { getTrainingLogs } = require('./trainingService');
 const { extractTrainingMetrics } = require('./gptExtractor');
 const { getClubContextIfNeeded } = require('./clubInfoService');
+const { logWarn, safeErrorMessage } = require('./logger');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -17,6 +18,24 @@ const TRAINING_LOOKBACK_DAYS = 60;
 const TRAINING_RECENT_ITEMS = 10;
 const RUNS_RECENT_ITEMS = 3;
 const DUPLICATE_TRAINING_WINDOW_MINUTES = 30;
+
+// Serializa escrituras por usuario (reduce condiciones de carrera en updates en background)
+const userWriteQueue = new Map(); // userId -> Promise
+function enqueueUserWrite(userId, fn) {
+  const key = String(userId);
+  const prev = userWriteQueue.get(key) || Promise.resolve();
+  const next = prev
+    .catch(() => {}) // si falló algo antes, no rompemos la cadena
+    .then(fn)
+    .catch((err) => {
+      logWarn('user write task failed', { userId: key, error: safeErrorMessage(err) });
+    })
+    .finally(() => {
+      if (userWriteQueue.get(key) === next) userWriteQueue.delete(key);
+    });
+  userWriteQueue.set(key, next);
+  return next;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -493,6 +512,14 @@ async function upsertUserProfile(userId, profile) {
     .upsert({ user_id: userId, profile, updated_at: nowIso() });
 }
 
+async function patchUserProfile(userId, patchFn) {
+  return enqueueUserWrite(userId, async () => {
+    const current = await loadUserProfile(userId);
+    const next = await patchFn(current || {});
+    await upsertUserProfile(userId, next || {});
+  });
+}
+
 /* =========================
    CONSULTAS ENTRENOS
 ========================= */
@@ -840,14 +867,14 @@ async function chat(telegramId, message) {
     loadUserProfile(user.id)
   ]);
   const intent = detectIntent(normalizedMessage);
+  let localProfile = profile || {};
 
   // Guardado determinista del nombre (sin depender de GPT ni del routing)
   const extractedName = extractNameFromMessage(normalizedMessage);
-  if (extractedName && extractedName !== profile?.name) {
-    const nextProfile = { ...(profile || {}), name: extractedName };
-    profile = nextProfile;
-    // Persistencia en segundo plano (no bloquea respuesta)
-    upsertUserProfile(user.id, nextProfile).catch(() => {});
+  if (extractedName && extractedName !== localProfile?.name) {
+    localProfile = { ...localProfile, name: extractedName };
+    // Persistencia en segundo plano (serializada por usuario)
+    patchUserProfile(user.id, (curr) => ({ ...(curr || {}), name: extractedName })).catch(() => {});
   }
 
   // Hint de continuidad para respuestas tipo "sí/vale/ok"
@@ -863,7 +890,7 @@ async function chat(telegramId, message) {
 
   const clubPromise = getClubContextIfNeeded(normalizedMessage).catch(() => '');
   const trainingPromise = shouldLoadTraining ? loadTrainingContext(user.id).catch(() => '') : Promise.resolve('');
-  const factsPromise = buildFactsBlock({ userId: user.id, normalizedMessage, profile });
+  const factsPromise = buildFactsBlock({ userId: user.id, normalizedMessage, profile: localProfile });
 
   const [clubContext, trainingContext, factsBlock] = await Promise.all([
     clubPromise,
@@ -871,9 +898,9 @@ async function chat(telegramId, message) {
     factsPromise
   ]);
 
-  const finalProfileBlock = formatProfileForPrompt(profile);
-  const finalSessionBlock = formatSessionForPrompt(profile?.session || {});
-  const finalSummaryBlock = formatConversationSummaryForPrompt(profile?.conversation_summary);
+  const finalProfileBlock = formatProfileForPrompt(localProfile);
+  const finalSessionBlock = formatSessionForPrompt(localProfile?.session || {});
+  const finalSummaryBlock = formatConversationSummaryForPrompt(localProfile?.conversation_summary);
 
   const mentalState = buildMentalState({
     intent,
@@ -905,30 +932,43 @@ async function chat(telegramId, message) {
   const finalReply = clampText(reply, 4000);
 
   // Persistencia en segundo plano (no bloquea respuesta al usuario)
-  saveConversationTurn(user.id, message, finalReply).catch(() => {});
+  saveConversationTurn(user.id, message, finalReply).catch((err) => {
+    logWarn('saveConversationTurn failed', { userId: String(user.id), error: safeErrorMessage(err) });
+  });
 
   // Trabajos “lentos” en segundo plano
   if (looksLikeTrainingLog(normalizedMessage)) {
-    trySaveTrainingFromMessage(user.id, message, normalizedMessage).catch(() => {});
+    trySaveTrainingFromMessage(user.id, message, normalizedMessage).catch((err) => {
+      logWarn('trySaveTrainingFromMessage failed', { userId: String(user.id), error: safeErrorMessage(err) });
+    });
   }
 
-  const existingSession = profile?.session || {};
+  const existingSession = localProfile?.session || {};
   updateSessionFromMessage({ message: normalizedMessage, existingSession })
-    .then((newSession) => {
-      const nextProfile = { ...(profile || {}), session: newSession };
-      return upsertUserProfile(user.id, nextProfile);
-    })
-    .catch(() => {});
+    .then((newSession) =>
+      patchUserProfile(user.id, (curr) => ({ ...(curr || {}), session: newSession }))
+    )
+    .catch((err) => {
+      logWarn('updateSessionFromMessage failed', { userId: String(user.id), error: safeErrorMessage(err) });
+    });
 
   if (shouldUpdateProfile(normalizedMessage)) {
-    updateProfileFromMessage({ message: normalizedMessage, existingProfile: profile })
-      .then((merged) => upsertUserProfile(user.id, merged))
-      .catch(() => {});
+    updateProfileFromMessage({ message: normalizedMessage, existingProfile: localProfile })
+      .then((merged) =>
+        patchUserProfile(user.id, (curr) => ({ ...(curr || {}), ...(merged || {}) }))
+      )
+      .catch((err) => {
+        logWarn('updateProfileFromMessage failed', { userId: String(user.id), error: safeErrorMessage(err) });
+      });
   }
 
-  maybeRefreshConversationSummary({ userId: user.id, profile, history })
-    .then((updated) => upsertUserProfile(user.id, updated))
-    .catch(() => {});
+  maybeRefreshConversationSummary({ userId: user.id, profile: localProfile, history })
+    .then((updated) =>
+      patchUserProfile(user.id, (curr) => ({ ...(curr || {}), ...(updated || {}) }))
+    )
+    .catch((err) => {
+      logWarn('maybeRefreshConversationSummary failed', { userId: String(user.id), error: safeErrorMessage(err) });
+    });
 
   return finalReply;
 }

@@ -35,12 +35,16 @@ Copia `.env.example` a `.env` y rellena:
 SUPABASE_URL=https://tu-proyecto.supabase.co
 SUPABASE_SERVICE_KEY=tu-service-role-key
 OPENAI_API_KEY=sk-...
+TELEGRAM_BOT_TOKEN=tu-token-botfather
+TELEGRAM_WEBHOOK_SECRET=una-cadena-larga-y-secreta
+CHAT_API_KEY=tu-api-key-opcional
 PORT=3000
 ```
 
 ### Base de datos
 
 Ejecuta el script `supabase-schema.sql` en el **SQL Editor** de tu proyecto Supabase para crear las tablas.
+Si ya lo ejecutaste antes, ejecuta también `supabase-telegram-updates.sql` para habilitar deduplicación del webhook.
 
 ---
 
