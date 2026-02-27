@@ -38,6 +38,7 @@ REGLAS IMPORTANTES:
 6. No contestes con textos demasiado largos. Solo cuando el usuario te lo pida.
 7. No hables de cosas que no sabes.
 8. Si no sabes algo, responde con: "No puedo darte una respuesta sobre eso"
+9. Nunca digas "no tengo acceso a datos anteriores". Si no hay datos, dilo así: "No tengo registros guardados de eso todavía".
 
 FUNCIONES:
 - Analizar entrenamientos.
@@ -158,6 +159,7 @@ function detectRecallDataQuery(message) {
     m.includes('te he puesto') ||
     m.includes('te pasé') ||
     m.includes('te pase') ||
+    m.includes('te di') ||
     m.includes('te dije') ||
     m.includes('te comenté') ||
     m.includes('te comente') ||
@@ -169,6 +171,19 @@ function detectRecallDataQuery(message) {
     m.includes('tienes ese dato') ||
     m.includes('lo recuerdas') ||
     m.includes('recuerdas eso')
+  );
+}
+
+function detectRunDataQuery(message) {
+  const m = (message || '').toLowerCase();
+  // “dato de carrera”, “mi última carrera”, “ritmo”, etc.
+  return (
+    m.includes('carrera') ||
+    m.includes('correr') ||
+    m.includes('corrida') ||
+    m.includes('run') ||
+    m.includes('ritmo') ||
+    m.includes('pace')
   );
 }
 
@@ -192,6 +207,8 @@ function needsTrainingContext(message) {
     'progreso',
     'marca',
     'mejora',
+    'carrera',
+    'ritmo',
     'corrí',
     'corriste',
     'peso',
@@ -302,6 +319,39 @@ async function hasAnyTrainingLogs(userId) {
 
   if (error) throw error;
   return (data && data[0]) || null;
+}
+
+async function getRecentRuns(userId, limit = 3) {
+  // Carrera puede venir como exercise="carrera" o como distancia/tiempo
+  const { data, error } = await supabase
+    .from('training_logs')
+    .select('exercise, distance_km, time_seconds, created_at, raw_text')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(40);
+
+  if (error) throw error;
+  const rows = (data || []).filter((r) => {
+    const ex = (r.exercise || '').toLowerCase();
+    return ex.includes('carrera') || ex.includes('run') || r.distance_km || r.time_seconds;
+  });
+
+  return rows.slice(0, limit);
+}
+
+function formatRunRow(row) {
+  const date = new Date(row.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+  const dist = row.distance_km ? `${row.distance_km}km` : null;
+  const time = row.time_seconds ? `${Math.floor(row.time_seconds / 60)}:${String(row.time_seconds % 60).padStart(2, '0')}` : null;
+
+  let pace = null;
+  if (row.distance_km && row.time_seconds) {
+    const paceSec = Math.round(row.time_seconds / row.distance_km);
+    pace = `${Math.floor(paceSec / 60)}:${String(paceSec % 60).padStart(2, '0')}/km`;
+  }
+
+  const parts = [dist, time, pace].filter(Boolean).join(' · ');
+  return `- ${date}: ${parts || row.raw_text?.slice(0, 80) || 'carrera'}`;
 }
 
 async function updateProfileFromMessage({ userId, message, existingProfile }) {
@@ -464,6 +514,17 @@ async function chat(telegramId, message) {
 
   if (detectRecallDataQuery(normalizedMessage)) {
     try {
+      // Si el usuario está hablando de carrera, devuelve directamente los registros de carrera
+      if (detectRunDataQuery(normalizedMessage)) {
+        const runs = await getRecentRuns(user.id, 3);
+        const reply = runs.length
+          ? `Sí, tengo carreras guardadas. Estas son las más recientes:\n${runs.map(formatRunRow).join('\n')}\n\nDime cuál quieres (por fecha o distancia) y te la analizo.`
+          : `Todavía no tengo ninguna carrera guardada.\nPásame un registro tipo: "Corrí 5km en 27:30" y desde ahí lo vamos siguiendo.`;
+
+        await saveConversationTurn(user.id, message, reply);
+        return reply;
+      }
+
       const lastLog = await hasAnyTrainingLogs(user.id);
       const known = [];
       if (profile?.name) known.push(`- nombre: ${profile.name}`);
@@ -477,7 +538,7 @@ async function chat(telegramId, message) {
       if (known.length) pieces.push(`Sí. En tu perfil tengo:\n${known.join('\n')}`);
       if (lastLog?.created_at) {
         const date = new Date(lastLog.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
-        pieces.push(`Y tengo entrenamientos guardados (el último registrado es del ${date}).`);
+        pieces.push(`También tengo entrenamientos guardados (el último registro es del ${date}).`);
       }
 
       const reply = pieces.length
