@@ -1,6 +1,8 @@
 const OpenAI = require('openai');
 const { supabase } = require('../config/supabase');
 const { getOrCreateUser } = require('./userService');
+const { getTrainingLogs } = require('./trainingService');
+const { extractTrainingMetrics } = require('./gptExtractor');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -40,9 +42,11 @@ const SYSTEM_PROMPT = `Eres el coach oficial de NORTH Hybrid Club, un gimnasio h
 6. Si no tienes información actualizada sobre horarios o disponibilidad específica de clases, indica la información que sí es correcta y sugiere consultar la web para cambios recientes.
 
 **Objetivo final:**
-Convertirte en un entrenador virtual experto, confiable y motivador, con la personalidad y datos reales de NORTH Hybrid Club, capaz de interactuar como un coach de verdad.`;
+Convertirte en un entrenador virtual experto, confiable y motivador, con la personalidad y datos reales de NORTH Hybrid Club, capaz de interactuar como un coach de verdad.
 
-const MAX_HISTORY = 20;
+**IMPORTANTE:** Tienes acceso al historial de conversación y a los entrenamientos registrados del usuario. USA ESOS DATOS para responder. Cuando el usuario pregunte por entrenamientos anteriores, consulta el historial y los entrenamientos. NUNCA digas "no tengo acceso" si los datos están en el contexto.`;
+
+const MAX_HISTORY = 40;
 
 async function loadHistory(userId) {
   const { data } = await supabase
@@ -53,6 +57,45 @@ async function loadHistory(userId) {
     .limit(MAX_HISTORY);
 
   return (data || []).map((m) => ({ role: m.role, content: m.content }));
+}
+
+async function loadTrainingContext(userId) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 90); // Últimos 90 días
+  const logs = await getTrainingLogs(userId, start.toISOString(), end.toISOString());
+  if (!logs || logs.length === 0) return '';
+  const lines = logs.map((l) => {
+    const parts = [];
+    if (l.exercise) parts.push(l.exercise);
+    if (l.sets && l.reps) parts.push(`${l.sets}x${l.reps}`);
+    if (l.weight) parts.push(`${l.weight}kg`);
+    if (l.distance_km) parts.push(`${l.distance_km}km`);
+    if (l.time_seconds) parts.push(`${Math.round(l.time_seconds / 60)}min`);
+    const date = new Date(l.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+    return `- ${date}: ${parts.join(' ') || l.raw_text?.slice(0, 80)}`;
+  });
+  return 'Entrenamientos registrados del usuario:\n' + lines.join('\n');
+}
+
+async function trySaveTrainingFromMessage(userId, message) {
+  try {
+    const metrics = await extractTrainingMetrics(message);
+    if (!metrics || metrics.length === 0) return;
+    const logs = metrics.map((m) => ({
+      user_id: userId,
+      raw_text: message,
+      exercise: m.exercise,
+      sets: m.sets,
+      reps: m.reps,
+      weight: m.weight,
+      time_seconds: m.time_seconds,
+      distance_km: m.distance_km
+    }));
+    await supabase.from('training_logs').insert(logs);
+  } catch {
+    // Ignorar errores de extracción
+  }
 }
 
 async function saveMessage(userId, role, content) {
@@ -70,10 +113,20 @@ async function clearHistory(telegramId) {
 
 async function chat(telegramId, message) {
   const user = await getOrCreateUser(telegramId);
-  const history = await loadHistory(user.id);
+  const [history, trainingContext] = await Promise.all([
+    loadHistory(user.id),
+    loadTrainingContext(user.id)
+  ]);
+
+  const contextBlock = trainingContext
+    ? `\n\n--- DATOS DEL USUARIO ---\n${trainingContext}\n--- FIN DATOS ---\n`
+    : '';
+  const systemWithContext = SYSTEM_PROMPT + contextBlock;
+
+  trySaveTrainingFromMessage(user.id, message).catch(() => {});
 
   const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemWithContext },
     ...history,
     { role: 'user', content: message }
   ];
