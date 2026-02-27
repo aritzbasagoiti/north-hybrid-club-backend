@@ -77,6 +77,7 @@ async function handleUpdate(update) {
 
   // Si no hay texto, intentamos transcribir voz (voice / audio / video_note)
   if (!text) {
+    const isVoice = Boolean(msg.voice?.file_id || msg.video_note?.file_id);
     const voiceFileId = msg.voice?.file_id || msg.audio?.file_id || msg.video_note?.file_id || null;
     if (!voiceFileId) return;
 
@@ -84,8 +85,12 @@ async function handleUpdate(update) {
     try {
       const filePath = await getTelegramFilePath(voiceFileId);
       const buf = await downloadTelegramFileBuffer(filePath);
-      const ext = filePath.split('.').pop() || 'ogg';
-      const transcript = await transcribeAudioBuffer(buf, `telegram.${ext}`);
+      const extRaw = (filePath.split('.').pop() || 'ogg').toLowerCase();
+      // Telegram voice suele venir como .oga (OGG/OPUS). Forzamos .ogg para que el modelo lo acepte.
+      const ext = (extRaw === 'oga' || extRaw === 'opus') ? 'ogg' : extRaw;
+      const filename = isVoice ? 'telegram.ogg' : `telegram.${ext}`;
+      const mime = (isVoice || ext === 'ogg') ? 'audio/ogg' : undefined;
+      const transcript = await transcribeAudioBuffer(buf, filename, mime);
       text = (transcript || '').trim();
 
       if (!text) {

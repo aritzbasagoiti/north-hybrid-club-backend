@@ -3,11 +3,11 @@ const { toFile } = require('openai');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function transcribeAudioBuffer(buffer, filename = 'audio.ogg') {
+async function transcribeAudioBuffer(buffer, filename = 'audio.ogg', mimeType = undefined) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error('Falta OPENAI_API_KEY para transcribir audio');
   }
-  const file = await toFile(buffer, filename);
+  const file = await toFile(buffer, filename, mimeType ? { type: mimeType } : undefined);
   const result = await openai.audio.transcriptions.create({
     model: 'gpt-4o-mini-transcribe',
     file
