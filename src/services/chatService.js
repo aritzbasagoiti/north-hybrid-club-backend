@@ -99,6 +99,7 @@ REGLAS IMPORTANTES:
 11. Asume continuidad: habla como alguien que ya conoce al usuario por conversaciones anteriores, salvo que el usuario pida explícitamente empezar de cero.
 12. Antes de responder, decide internamente: (a) qué sé ya del usuario, (b) qué intención tiene el mensaje, (c) si debo preguntar 1 cosa para concretar.
 13. Responde como ChatGPT: natural, conversacional, sin “modo reporte” salvo que el usuario lo pida.
+14. Nunca muestres al usuario etiquetas internas como MENTE_NORTE, CONTINUACION, FACT_*, PERFIL_USUARIO, ESTADO_SESION, RESUMEN_CONVERSACION, INFO_CLUB o DATOS_ENTRENAMIENTO. Úsalas solo como contexto.
 
 FUNCIONES:
 - Analizar entrenamientos.
@@ -792,82 +793,6 @@ async function chat(telegramId, message) {
     }
   }
 
-  // Rutas “directas” anti-alucinación
-  if (detectWhatDoYouKnowQuery(normalizedMessage)) {
-    const known = [];
-    if (profile?.name) known.push(`- nombre: ${profile.name}`);
-    if (profile?.goal) known.push(`- objetivo: ${profile.goal}`);
-    if (profile?.level) known.push(`- nivel: ${profile.level}`);
-    if (profile?.injuries) known.push(`- lesiones/limitaciones: ${profile.injuries}`);
-    if (profile?.availability) known.push(`- disponibilidad: ${profile.availability}`);
-    if (profile?.preferences) known.push(`- preferencias: ${profile.preferences}`);
-
-    const reply = known.length
-      ? `Perfecto. Esto es lo que recuerdo de ti ahora mismo:\n${known.join('\n')}`
-      : `Todavía no tengo datos personales tuyos guardados.\nDime por ejemplo: "Me llamo ___, mi objetivo es ___ y tengo ___" y lo guardaré.`;
-
-    await saveConversationTurn(user.id, message, reply);
-    return reply;
-  }
-
-  if (detectRecallDataQuery(normalizedMessage)) {
-    try {
-      if (detectRunDataQuery(normalizedMessage)) {
-        const runs = await getRecentRuns(user.id, RUNS_RECENT_ITEMS);
-        const reply = runs.length
-          ? `Sí, tengo carreras guardadas. Estas son las más recientes:\n${runs.map(formatRunRow).join('\n')}\n\nDime cuál quieres (por fecha o distancia) y te la analizo.`
-          : `Todavía no tengo ninguna carrera guardada.\nPásame un registro tipo: "Corrí 5km en 27:30" y desde ahí lo vamos siguiendo.`;
-
-        await saveConversationTurn(user.id, message, reply);
-        return reply;
-      }
-
-      const lastLog = await hasAnyTrainingLogs(user.id);
-      const known = [];
-      if (profile?.name) known.push(`- nombre: ${profile.name}`);
-      if (profile?.goal) known.push(`- objetivo: ${profile.goal}`);
-      if (profile?.level) known.push(`- nivel: ${profile.level}`);
-      if (profile?.injuries) known.push(`- lesiones/limitaciones: ${profile.injuries}`);
-      if (profile?.availability) known.push(`- disponibilidad: ${profile.availability}`);
-      if (profile?.preferences) known.push(`- preferencias: ${profile.preferences}`);
-
-      const pieces = [];
-      if (known.length) pieces.push(`Sí. De ti tengo esto apuntado:\n${known.join('\n')}`);
-      if (lastLog?.created_at) {
-        pieces.push(`Y sí: también tengo entrenamientos guardados.`);
-      }
-
-      const reply = pieces.length
-        ? pieces.join('\n\n') + `\n\nDime qué dato exacto buscas (por ejemplo: "mi última carrera" o "mi sentadilla") y te lo saco.`
-        : `Creo que todavía no tengo datos guardados tuyos (ni perfil ni entrenamientos).\nPásame el dato otra vez (por ejemplo: "Back squat 3x5 con 100kg" o "me llamo ___ y mi objetivo es ___") y lo guardo para próximas veces.`;
-
-      await saveConversationTurn(user.id, message, reply);
-      return reply;
-    } catch {
-      const reply = `Ahora mismo no puedo comprobar tus datos guardados. Inténtalo de nuevo en un minuto.`;
-      await saveConversationTurn(user.id, message, reply);
-      return reply;
-    }
-  }
-
-  // PRs
-  const prQuery = detectPRQuery(normalizedMessage);
-  if (prQuery) {
-    try {
-      const best = await getBestWeightForExercise(user.id, prQuery.exercisePatterns);
-      const reply = best?.weight
-        ? `Tu mejor registro que tengo para ${prQuery.label} es ${best.weight}kg.`
-        : `No tengo ningún registro de ${prQuery.label} todavía.\nSi me escribes tu última marca (ej: "Back squat 3x5 con 100kg"), la guardo y desde ahí lo vamos siguiendo.`;
-
-      await saveConversationTurn(user.id, message, reply);
-      return reply;
-    } catch {
-      const reply = `Ahora mismo no puedo consultar tus registros. Inténtalo de nuevo en un minuto.`;
-      await saveConversationTurn(user.id, message, reply);
-      return reply;
-    }
-  }
-
   // Hint de continuidad para respuestas tipo "sí/vale/ok"
   const continuationHint = getContinuationHint(normalizedMessage, history);
 
@@ -940,6 +865,21 @@ async function chat(telegramId, message) {
   // Hechos puntuales (para responder fluido sin inventar)
   let factsBlock = '';
   try {
+    const wantsMemory = detectWhatDoYouKnowQuery(normalizedMessage) || detectRecallDataQuery(normalizedMessage);
+    if (wantsMemory) {
+      const known = [];
+      if (profile?.name) known.push(`nombre: ${profile.name}`);
+      if (profile?.goal) known.push(`objetivo: ${profile.goal}`);
+      if (profile?.level) known.push(`nivel: ${profile.level}`);
+      if (profile?.injuries) known.push(`lesiones: ${profile.injuries}`);
+      if (profile?.availability) known.push(`disponibilidad: ${profile.availability}`);
+      if (profile?.preferences) known.push(`preferencias: ${profile.preferences}`);
+      factsBlock += `FACT_MEMORIA_PERFIL:\n${known.length ? known.map((x) => `- ${x}`).join('\n') : 'SIN_DATOS'}\nFIN_FACT_MEMORIA_PERFIL\n`;
+
+      const lastLog = await hasAnyTrainingLogs(user.id);
+      factsBlock += `FACT_MEMORIA_ENTRENOS:\n- hay_entrenos: ${lastLog ? 'SI' : 'NO'}\nFIN_FACT_MEMORIA_ENTRENOS\n`;
+    }
+
     // PR fact (si pregunta por back squat/bench/etc pero no disparó ruta directa)
     const pr = detectPRQuery(normalizedMessage);
     if (pr) {
