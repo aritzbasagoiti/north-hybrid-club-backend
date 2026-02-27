@@ -17,8 +17,10 @@ Tu nombre es NORTE.
 Eres el coach oficial de NORTH Hybrid Club.
 Especialista en HYROX, fuerza y entrenamiento híbrido.
 
-SALUDO (úsalo de forma natural, sobre todo al inicio o cuando el usuario salude):
-Hola! Soy Norte y estoy aqui para acompañarte en tus dudas y progresos!
+PRESENTACIÓN:
+- No te presentes en cada mensaje.
+- Preséntate solo en la primera interacción o si el usuario saluda.
+- Si te presentas, puedes usar: "Hola! Soy Norte y estoy aquí para acompañarte en tus dudas y progresos!"
 
 PERSONALIDAD:
 - Cercano pero profesional.
@@ -149,6 +151,39 @@ function detectWhatDoYouKnowQuery(message) {
   );
 }
 
+function detectRecallDataQuery(message) {
+  const m = (message || '').toLowerCase();
+  return (
+    m.includes('te puse') ||
+    m.includes('te he puesto') ||
+    m.includes('te pasé') ||
+    m.includes('te pase') ||
+    m.includes('te dije') ||
+    m.includes('te comenté') ||
+    m.includes('te comente') ||
+    m.includes('lo tienes') ||
+    m.includes('lo tienes?') ||
+    m.includes('lo guardaste') ||
+    m.includes('lo has guardado') ||
+    m.includes('tienes eso') ||
+    m.includes('tienes ese dato') ||
+    m.includes('lo recuerdas') ||
+    m.includes('recuerdas eso')
+  );
+}
+
+function isGreeting(message) {
+  const m = (message || '').toLowerCase().trim();
+  return (
+    m === 'hola' ||
+    m.startsWith('hola ') ||
+    m.includes('buenas') ||
+    m.includes('hey') ||
+    m.includes('qué tal') ||
+    m.includes('que tal')
+  );
+}
+
 function needsTrainingContext(message) {
   const keywords = [
     'ayer',
@@ -251,6 +286,18 @@ async function getBestWeightForExercise(userId, exercisePatterns) {
     .not('weight', 'is', null)
     .or(orFilter)
     .order('weight', { ascending: false })
+    .limit(1);
+
+  if (error) throw error;
+  return (data && data[0]) || null;
+}
+
+async function hasAnyTrainingLogs(userId) {
+  const { data, error } = await supabase
+    .from('training_logs')
+    .select('id, created_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
     .limit(1);
 
   if (error) throw error;
@@ -415,6 +462,37 @@ async function chat(telegramId, message) {
     return reply;
   }
 
+  if (detectRecallDataQuery(normalizedMessage)) {
+    try {
+      const lastLog = await hasAnyTrainingLogs(user.id);
+      const known = [];
+      if (profile?.name) known.push(`- nombre: ${profile.name}`);
+      if (profile?.goal) known.push(`- objetivo: ${profile.goal}`);
+      if (profile?.level) known.push(`- nivel: ${profile.level}`);
+      if (profile?.injuries) known.push(`- lesiones/limitaciones: ${profile.injuries}`);
+      if (profile?.availability) known.push(`- disponibilidad: ${profile.availability}`);
+      if (profile?.preferences) known.push(`- preferencias: ${profile.preferences}`);
+
+      const pieces = [];
+      if (known.length) pieces.push(`Sí. En tu perfil tengo:\n${known.join('\n')}`);
+      if (lastLog?.created_at) {
+        const date = new Date(lastLog.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+        pieces.push(`Y tengo entrenamientos guardados (el último registrado es del ${date}).`);
+      }
+
+      const reply = pieces.length
+        ? pieces.join('\n\n') + `\n\nSi me dices qué dato exacto buscas (por ejemplo: "mi última carrera" o "mi sentadilla"), te lo saco.`
+        : `Creo que todavía no tengo datos guardados tuyos (ni perfil ni entrenamientos).\nPásame el dato otra vez (por ejemplo: "Back squat 3x5 con 100kg" o "me llamo ___ y mi objetivo es ___") y lo guardo para próximas veces.`;
+
+      await saveConversationTurn(user.id, message, reply);
+      return reply;
+    } catch {
+      const reply = `Ahora mismo no puedo comprobar tus datos guardados. Inténtalo de nuevo en un minuto.`;
+      await saveConversationTurn(user.id, message, reply);
+      return reply;
+    }
+  }
+
   const prQuery = detectPRQuery(normalizedMessage);
   if (prQuery) {
     try {
@@ -475,9 +553,17 @@ async function chat(telegramId, message) {
     completion.choices[0]?.message?.content ||
     'No pude generar respuesta.';
 
-  await saveConversationTurn(user.id, message, reply);
+  // Presentación solo si es primera interacción o saludo
+  const shouldIntro = history.length === 0 || isGreeting(normalizedMessage);
+  const intro = 'Hola! Soy Norte y estoy aquí para acompañarte en tus dudas y progresos!\n\n';
+  const finalReply =
+    shouldIntro && reply && !reply.toLowerCase().includes('soy norte')
+      ? intro + reply
+      : reply;
 
-  return reply;
+  await saveConversationTurn(user.id, message, finalReply);
+
+  return finalReply;
 }
 
 module.exports = { chat, clearHistory };
