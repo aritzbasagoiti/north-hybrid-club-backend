@@ -1,5 +1,6 @@
 const express = require('express');
 const { chat } = require('../services/chatService');
+const { transcribeAudioBuffer } = require('../services/transcriptionService');
 
 const router = express.Router();
 
@@ -22,7 +23,7 @@ async function fetchWithRetry(url, options, retries = 3) {
 
 async function sendTelegram(chatId, text) {
   if (!BOT_TOKEN) return;
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  await fetchWithRetry(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -32,6 +33,25 @@ async function sendTelegram(chatId, text) {
       text,
     }),
   });
+}
+
+async function getTelegramFilePath(fileId) {
+  const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/getFile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_id: fileId })
+  });
+  const data = await res.json().catch(() => ({}));
+  const filePath = data?.result?.file_path;
+  if (!filePath) throw new Error('No se pudo obtener file_path de Telegram');
+  return filePath;
+}
+
+async function downloadTelegramFileBuffer(filePath) {
+  const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+  const res = await fetchWithRetry(url, { method: 'GET' });
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
 }
 
 async function sendTyping(chatId) {
@@ -55,7 +75,28 @@ async function handleUpdate(update) {
   let text = (msg.text || '').trim();
   const telegramId = String(msg.from?.id || '');
 
-  if (!text) return;
+  // Si no hay texto, intentamos transcribir voz (voice / audio / video_note)
+  if (!text) {
+    const voiceFileId = msg.voice?.file_id || msg.audio?.file_id || msg.video_note?.file_id || null;
+    if (!voiceFileId) return;
+
+    await sendTyping(chatId);
+    try {
+      const filePath = await getTelegramFilePath(voiceFileId);
+      const buf = await downloadTelegramFileBuffer(filePath);
+      const ext = filePath.split('.').pop() || 'ogg';
+      const transcript = await transcribeAudioBuffer(buf, `telegram.${ext}`);
+      text = (transcript || '').trim();
+
+      if (!text) {
+        await sendTelegram(chatId, 'No he podido transcribir ese audio. ¿Puedes repetirlo o escribirlo?');
+        return;
+      }
+    } catch (err) {
+      await sendTelegram(chatId, `❌ No pude transcribir el audio: ${err.message}`);
+      return;
+    }
+  }
 
   // Sin comandos: todo se trata como conversación normal.
   // /start (y similares) lo convertimos a un saludo para una UX mejor.
