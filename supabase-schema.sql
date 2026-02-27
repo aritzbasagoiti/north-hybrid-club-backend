@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Tabla user_profile (perfil persistente del usuario para "memoria" del coach)
+CREATE TABLE IF NOT EXISTS user_profile (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Índices para consultas frecuentes
 CREATE INDEX IF NOT EXISTS idx_training_logs_user_created 
   ON training_logs(user_id, created_at);

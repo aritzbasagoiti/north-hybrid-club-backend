@@ -57,6 +57,32 @@ const MAX_HISTORY = 30;
    HELPERS
 ========================= */
 
+function shouldUpdateProfile(message) {
+  const m = message.toLowerCase();
+  const keywords = [
+    'me llamo',
+    'mi nombre',
+    'soy ',
+    'tengo ',
+    'mido ',
+    'peso ',
+    'objetivo',
+    'meta',
+    'lesion',
+    'lesión',
+    'dolor',
+    'oper',
+    'puedo entrenar',
+    'entreno',
+    'disponibilidad',
+    'horario',
+    'prefiero',
+    'no me gusta',
+    'me gusta'
+  ];
+  return keywords.some((k) => m.includes(k));
+}
+
 function needsTrainingContext(message) {
   const keywords = [
     'ayer',
@@ -70,7 +96,13 @@ function needsTrainingContext(message) {
     'peso',
     'tiempo',
     'km',
-    'entrené'
+    'entrené',
+    'cuanto',
+    'cuánto',
+    'recuerdas',
+    'te dije',
+    'habia dicho',
+    'había dicho'
   ];
   return keywords.some(k => message.toLowerCase().includes(k));
 }
@@ -83,6 +115,26 @@ function normalizeShortReply(message, history) {
   if (!lastAssistant) return message;
 
   return `El usuario confirma que quiere continuar con esto: "${lastAssistant.content}"`;
+}
+
+function formatProfileForPrompt(profile) {
+  if (!profile || typeof profile !== 'object') return '';
+  const lines = [];
+  const push = (k, v) => {
+    if (v === null || v === undefined) return;
+    if (typeof v === 'string' && !v.trim()) return;
+    lines.push(`- ${k}: ${typeof v === 'string' ? v.trim() : JSON.stringify(v)}`);
+  };
+
+  push('nombre', profile.name);
+  push('objetivo', profile.goal);
+  push('nivel', profile.level);
+  push('lesiones/limitaciones', profile.injuries);
+  push('disponibilidad', profile.availability);
+  push('preferencias', profile.preferences);
+
+  if (lines.length === 0) return '';
+  return `PERFIL_USUARIO (memoria persistente):\n${lines.join('\n')}\nFIN_PERFIL`;
 }
 
 /* =========================
@@ -101,6 +153,59 @@ async function loadHistory(userId) {
     role: m.role,
     content: m.content
   }));
+}
+
+/* =========================
+   PROFILE MEMORY (Supabase)
+========================= */
+
+async function loadUserProfile(userId) {
+  const { data } = await supabase
+    .from('user_profile')
+    .select('profile')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  return data?.profile || {};
+}
+
+async function upsertUserProfile(userId, profile) {
+  await supabase
+    .from('user_profile')
+    .upsert({ user_id: userId, profile, updated_at: new Date().toISOString() });
+}
+
+async function updateProfileFromMessage({ userId, message, existingProfile }) {
+  const extractorSystem = `Eres un extractor de datos de perfil de un usuario para un coach de entrenamiento.\nDevuelve SOLO JSON válido.\n\nExtrae y actualiza estos campos si aparecen:\n- name (string)\n- goal (string)\n- level (string) (principiante/intermedio/avanzado)\n- injuries (string)\n- availability (string)\n- preferences (string)\n\nReglas:\n- Si no hay datos nuevos, devuelve {}.\n- No inventes datos.\n- Si el usuario no da un dato explícito, no lo pongas.`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: extractorSystem },
+      { role: 'user', content: JSON.stringify({ existingProfile, message }) }
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0
+  });
+
+  const content = completion.choices[0]?.message?.content || '{}';
+  let extracted = {};
+  try {
+    extracted = JSON.parse(content);
+  } catch {
+    extracted = {};
+  }
+
+  if (!extracted || typeof extracted !== 'object') return existingProfile;
+
+  const merged = { ...existingProfile };
+  for (const [k, v] of Object.entries(extracted)) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' && !v.trim()) continue;
+    merged[k] = v;
+  }
+
+  return merged;
 }
 
 /* =========================
@@ -201,14 +306,31 @@ async function chat(telegramId, message) {
   const history = await loadHistory(user.id);
   const normalizedMessage = normalizeShortReply(message, history);
 
+  const profile = await loadUserProfile(user.id);
+  const profileBlock = formatProfileForPrompt(profile);
+
   let trainingContext = '';
   if (needsTrainingContext(normalizedMessage)) {
     trainingContext = await loadTrainingContext(user.id);
   }
 
-  const systemContent = SYSTEM_PROMPT + '\n' + trainingContext;
+  const systemContent = [
+    SYSTEM_PROMPT,
+    profileBlock,
+    trainingContext
+  ].filter(Boolean).join('\n\n');
 
   await trySaveTrainingFromMessage(user.id, normalizedMessage);
+
+  if (shouldUpdateProfile(normalizedMessage)) {
+    updateProfileFromMessage({
+      userId: user.id,
+      message: normalizedMessage,
+      existingProfile: profile
+    })
+      .then((merged) => upsertUserProfile(user.id, merged))
+      .catch(() => {});
+  }
 
   const messages = [
     { role: 'system', content: systemContent },
