@@ -3,6 +3,7 @@ const { supabase } = require('../config/supabase');
 const { getOrCreateUser } = require('./userService');
 const { getTrainingLogs } = require('./trainingService');
 const { extractTrainingMetrics } = require('./gptExtractor');
+const { getClubContextIfNeeded } = require('./clubInfoService');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -62,7 +63,6 @@ function shouldUpdateProfile(message) {
   const keywords = [
     'me llamo',
     'mi nombre',
-    'soy ',
     'tengo ',
     'mido ',
     'peso ',
@@ -72,8 +72,6 @@ function shouldUpdateProfile(message) {
     'lesión',
     'dolor',
     'oper',
-    'puedo entrenar',
-    'entreno',
     'disponibilidad',
     'horario',
     'prefiero',
@@ -81,6 +79,28 @@ function shouldUpdateProfile(message) {
     'me gusta'
   ];
   return keywords.some((k) => m.includes(k));
+}
+
+function looksLikeTrainingLog(message) {
+  const m = (message || '').toLowerCase();
+  // patrones típicos: 3x8, 27:30, 5km, 90kg
+  const patterns = [
+    /\b\d+\s*x\s*\d+\b/,
+    /\b\d+:\d{2}\b/,
+    /\b\d+(\.\d+)?\s*km\b/,
+    /\b\d+(\.\d+)?\s*kg\b/,
+    /\bseries?\b/,
+    /\breps?\b/,
+    /\bmetcon\b/,
+    /\brun\b/,
+    /\bcorr(i|í)\b/,
+    /\bremo\b/,
+    /\bwall\s*balls?\b/,
+    /\bsled\b/,
+    /\bsentadilla\b/,
+    /\bpress\b/
+  ];
+  return patterns.some((p) => p.test(m));
 }
 
 function needsTrainingContext(message) {
@@ -146,13 +166,14 @@ async function loadHistory(userId) {
     .from('chat_messages')
     .select('role, content')
     .eq('user_id', userId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(MAX_HISTORY);
 
-  return (data || []).map(m => ({
+  const items = (data || []).map(m => ({
     role: m.role,
     content: m.content
   }));
+  return items.reverse();
 }
 
 /* =========================
@@ -255,6 +276,7 @@ FIN_DATOS
 
 async function trySaveTrainingFromMessage(userId, message) {
   try {
+    if (!looksLikeTrainingLog(message)) return;
     const metrics = await extractTrainingMetrics(message);
     if (!metrics || metrics.length === 0) return;
 
@@ -309,6 +331,8 @@ async function chat(telegramId, message) {
   const profile = await loadUserProfile(user.id);
   const profileBlock = formatProfileForPrompt(profile);
 
+  const clubContext = await getClubContextIfNeeded(normalizedMessage);
+
   let trainingContext = '';
   if (needsTrainingContext(normalizedMessage)) {
     trainingContext = await loadTrainingContext(user.id);
@@ -316,6 +340,7 @@ async function chat(telegramId, message) {
 
   const systemContent = [
     SYSTEM_PROMPT,
+    clubContext,
     profileBlock,
     trainingContext
   ].filter(Boolean).join('\n\n');
