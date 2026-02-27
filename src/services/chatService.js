@@ -382,6 +382,61 @@ function buildMentalState({
   );
 }
 
+async function buildFactsBlock({ userId, normalizedMessage, profile }) {
+  let facts = '';
+  try {
+    const wantsMemory = detectWhatDoYouKnowQuery(normalizedMessage) || detectRecallDataQuery(normalizedMessage);
+    const pr = detectPRQuery(normalizedMessage);
+    const wantsRuns = detectRunDataQuery(normalizedMessage);
+
+    const tasks = {
+      lastLog: wantsMemory ? hasAnyTrainingLogs(userId) : null,
+      best: pr ? getBestWeightForExercise(userId, pr.exercisePatterns) : null,
+      runs: wantsRuns ? getRecentRuns(userId, RUNS_RECENT_ITEMS) : null
+    };
+
+    const results = await Promise.all([
+      tasks.lastLog,
+      tasks.best,
+      tasks.runs
+    ].filter(Boolean));
+
+    // Reasignar (según cuáles existan)
+    let idx = 0;
+    const lastLog = tasks.lastLog ? results[idx++] : null;
+    const best = tasks.best ? results[idx++] : null;
+    const runs = tasks.runs ? results[idx++] : null;
+
+    if (wantsMemory) {
+      const known = [];
+      if (profile?.name) known.push(`nombre: ${profile.name}`);
+      if (profile?.goal) known.push(`objetivo: ${profile.goal}`);
+      if (profile?.level) known.push(`nivel: ${profile.level}`);
+      if (profile?.injuries) known.push(`lesiones: ${profile.injuries}`);
+      if (profile?.availability) known.push(`disponibilidad: ${profile.availability}`);
+      if (profile?.preferences) known.push(`preferencias: ${profile.preferences}`);
+      facts += `FACT_MEMORIA_PERFIL:\n${known.length ? known.map((x) => `- ${x}`).join('\n') : 'SIN_DATOS'}\nFIN_FACT_MEMORIA_PERFIL\n`;
+      facts += `FACT_MEMORIA_ENTRENOS:\n- hay_entrenos: ${lastLog ? 'SI' : 'NO'}\nFIN_FACT_MEMORIA_ENTRENOS\n`;
+    }
+
+    if (pr) {
+      facts += `FACT_PR:\n- ejercicio: ${pr.label}\n- mejor_peso_kg: ${best?.weight ?? 'SIN_REGISTRO'}\nFIN_FACT_PR\n`;
+    }
+
+    if (wantsRuns) {
+      if (runs && runs.length) {
+        facts += `FACT_CARRERAS_RECIENTES:\n${runs.map(formatRunRow).join('\n')}\nFIN_FACT_CARRERAS\n`;
+      } else {
+        facts += `FACT_CARRERAS_RECIENTES:\nSIN_REGISTROS\nFIN_FACT_CARRERAS\n`;
+      }
+    }
+  } catch {
+    // no bloquea
+  }
+
+  return facts.trim();
+}
+
 /* =========================
    SUPABASE: HISTORIAL / MEMORIA
 ========================= */
@@ -774,79 +829,28 @@ async function chat(telegramId, message) {
 
   const user = await getOrCreateUser(telegramId);
 
-  const history = await loadHistory(user.id);
   const normalizedMessage = String(message || '').trim();
 
-  // memoria persistente
-  let profile = await loadUserProfile(user.id);
+  // Lecturas en paralelo (reduce latencia)
+  let [history, profile] = await Promise.all([
+    loadHistory(user.id),
+    loadUserProfile(user.id)
+  ]);
   const intent = detectIntent(normalizedMessage);
 
   // Guardado determinista del nombre (sin depender de GPT ni del routing)
   const extractedName = extractNameFromMessage(normalizedMessage);
   if (extractedName && extractedName !== profile?.name) {
     const nextProfile = { ...(profile || {}), name: extractedName };
-    try {
-      await upsertUserProfile(user.id, nextProfile);
-      profile = nextProfile;
-    } catch {
-      // no bloqueamos el chat por fallo de persistencia
-    }
+    profile = nextProfile;
+    // Persistencia en segundo plano (no bloquea respuesta)
+    upsertUserProfile(user.id, nextProfile).catch(() => {});
   }
 
   // Hint de continuidad para respuestas tipo "sí/vale/ok"
   const continuationHint = getContinuationHint(normalizedMessage, history);
 
-  // Guardado automático de entreno (antes del LLM, para que ya quede)
-  await trySaveTrainingFromMessage(user.id, message, normalizedMessage);
-
-  // Actualiza perfil + sesión de forma más fiable (si toca)
-  if (shouldUpdateProfile(normalizedMessage)) {
-    try {
-      const merged = await updateProfileFromMessage({
-        message: normalizedMessage,
-        existingProfile: profile
-      });
-
-      const newSession = await updateSessionFromMessage({
-        message: normalizedMessage,
-        existingSession: merged?.session || profile?.session || {}
-      });
-
-      const nextProfile = { ...(merged || profile), session: newSession };
-      await upsertUserProfile(user.id, nextProfile);
-      profile = nextProfile;
-    } catch {
-      // si falla, seguimos sin bloquear el chat
-    }
-  } else {
-    // aun sin update de perfil, actualiza estado de sesión “ligero”
-    try {
-      const newSession = await updateSessionFromMessage({
-        message: normalizedMessage,
-        existingSession: profile?.session || {}
-      });
-      const nextProfile = { ...(profile || {}), session: newSession };
-      await upsertUserProfile(user.id, nextProfile);
-      profile = nextProfile;
-    } catch {
-      // ignore
-    }
-  }
-
-  // Refresca resumen persistente de conversación (cuando haya suficiente material)
-  try {
-    const updated = await maybeRefreshConversationSummary({ userId: user.id, profile, history });
-    if (updated !== profile) {
-      await upsertUserProfile(user.id, updated);
-      profile = updated;
-    }
-  } catch {
-    // ignore
-  }
-
-  const clubContext = await getClubContextIfNeeded(normalizedMessage);
-
-  let trainingContext = '';
+  // Contextos en paralelo (club + training + facts)
   const shouldLoadTraining =
     intent === 'log_training' ||
     intent === 'progress_or_recall' ||
@@ -854,51 +858,15 @@ async function chat(telegramId, message) {
     intent === 'pr_lookup' ||
     needsTrainingContext(normalizedMessage);
 
-  if (shouldLoadTraining) {
-    try {
-      trainingContext = await loadTrainingContext(user.id);
-    } catch {
-      trainingContext = '';
-    }
-  }
+  const clubPromise = getClubContextIfNeeded(normalizedMessage).catch(() => '');
+  const trainingPromise = shouldLoadTraining ? loadTrainingContext(user.id).catch(() => '') : Promise.resolve('');
+  const factsPromise = buildFactsBlock({ userId: user.id, normalizedMessage, profile });
 
-  // Hechos puntuales (para responder fluido sin inventar)
-  let factsBlock = '';
-  try {
-    const wantsMemory = detectWhatDoYouKnowQuery(normalizedMessage) || detectRecallDataQuery(normalizedMessage);
-    if (wantsMemory) {
-      const known = [];
-      if (profile?.name) known.push(`nombre: ${profile.name}`);
-      if (profile?.goal) known.push(`objetivo: ${profile.goal}`);
-      if (profile?.level) known.push(`nivel: ${profile.level}`);
-      if (profile?.injuries) known.push(`lesiones: ${profile.injuries}`);
-      if (profile?.availability) known.push(`disponibilidad: ${profile.availability}`);
-      if (profile?.preferences) known.push(`preferencias: ${profile.preferences}`);
-      factsBlock += `FACT_MEMORIA_PERFIL:\n${known.length ? known.map((x) => `- ${x}`).join('\n') : 'SIN_DATOS'}\nFIN_FACT_MEMORIA_PERFIL\n`;
-
-      const lastLog = await hasAnyTrainingLogs(user.id);
-      factsBlock += `FACT_MEMORIA_ENTRENOS:\n- hay_entrenos: ${lastLog ? 'SI' : 'NO'}\nFIN_FACT_MEMORIA_ENTRENOS\n`;
-    }
-
-    // PR fact (si pregunta por back squat/bench/etc pero no disparó ruta directa)
-    const pr = detectPRQuery(normalizedMessage);
-    if (pr) {
-      const best = await getBestWeightForExercise(user.id, pr.exercisePatterns);
-      factsBlock += `FACT_PR:\n- ejercicio: ${pr.label}\n- mejor_peso_kg: ${best?.weight ?? 'SIN_REGISTRO'}\nFIN_FACT_PR\n`;
-    }
-
-    // Carrera fact (si menciona carrera/ritmo)
-    if (detectRunDataQuery(normalizedMessage)) {
-      const runs = await getRecentRuns(user.id, RUNS_RECENT_ITEMS);
-      if (runs.length) {
-        factsBlock += `FACT_CARRERAS_RECIENTES:\n${runs.map(formatRunRow).join('\n')}\nFIN_FACT_CARRERAS\n`;
-      } else {
-        factsBlock += `FACT_CARRERAS_RECIENTES:\nSIN_REGISTROS\nFIN_FACT_CARRERAS\n`;
-      }
-    }
-  } catch {
-    // no bloquea
-  }
+  const [clubContext, trainingContext, factsBlock] = await Promise.all([
+    clubPromise,
+    trainingPromise,
+    factsPromise
+  ]);
 
   const finalProfileBlock = formatProfileForPrompt(profile);
   const finalSessionBlock = formatSessionForPrompt(profile?.session || {});
@@ -912,7 +880,7 @@ async function chat(telegramId, message) {
     clubBlock: clubContext,
     trainingBlock: trainingContext,
     continuationHint,
-    factsBlock: factsBlock.trim()
+    factsBlock
   });
 
   const systemContent = [SYSTEM_PROMPT, mentalState].filter(Boolean).join('\n\n');
@@ -927,13 +895,37 @@ async function chat(telegramId, message) {
     model: 'gpt-4o-mini',
     messages,
     temperature: 0.6,
-    max_tokens: 600
+    max_tokens: 450
   });
 
   const reply = completion.choices[0]?.message?.content || 'No pude generar respuesta.';
   const finalReply = clampText(reply, 4000);
 
-  await saveConversationTurn(user.id, message, finalReply);
+  // Persistencia en segundo plano (no bloquea respuesta al usuario)
+  saveConversationTurn(user.id, message, finalReply).catch(() => {});
+
+  // Trabajos “lentos” en segundo plano
+  if (looksLikeTrainingLog(normalizedMessage)) {
+    trySaveTrainingFromMessage(user.id, message, normalizedMessage).catch(() => {});
+  }
+
+  const existingSession = profile?.session || {};
+  updateSessionFromMessage({ message: normalizedMessage, existingSession })
+    .then((newSession) => {
+      const nextProfile = { ...(profile || {}), session: newSession };
+      return upsertUserProfile(user.id, nextProfile);
+    })
+    .catch(() => {});
+
+  if (shouldUpdateProfile(normalizedMessage)) {
+    updateProfileFromMessage({ message: normalizedMessage, existingProfile: profile })
+      .then((merged) => upsertUserProfile(user.id, merged))
+      .catch(() => {});
+  }
+
+  maybeRefreshConversationSummary({ userId: user.id, profile, history })
+    .then((updated) => upsertUserProfile(user.id, updated))
+    .catch(() => {});
 
   return finalReply;
 }
