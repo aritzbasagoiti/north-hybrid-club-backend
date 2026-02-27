@@ -1,6 +1,5 @@
 const express = require('express');
-const { chat, clearHistory } = require('../services/chatService');
-const { getWeeklyReport, getMonthlyReport } = require('../services/reportService');
+const { chat } = require('../services/chatService');
 
 const router = express.Router();
 
@@ -53,45 +52,15 @@ async function handleUpdate(update) {
   if (!msg) return;
 
   const chatId = msg.chat.id;
-  const text = (msg.text || '').trim();
+  let text = (msg.text || '').trim();
   const telegramId = String(msg.from?.id || '');
 
   if (!text) return;
 
-  if (text === '/start') {
-    await sendTelegram(chatId, 'Hola, soy el asistente de NORTH Hybrid Club. ¿En qué puedo ayudarte?');
-    return;
-  }
-
-  if (text === '/semana') {
-    await sendTyping(chatId);
-    try {
-      const result = await getWeeklyReport(telegramId);
-      await sendTelegram(chatId, result.summary || 'Sin datos para la semana.');
-    } catch (err) {
-      await sendTelegram(chatId, `❌ Error: ${err.message}`);
-    }
-    return;
-  }
-
-  if (text === '/mes') {
-    await sendTyping(chatId);
-    try {
-      const result = await getMonthlyReport(telegramId);
-      await sendTelegram(chatId, result.summary || 'Sin datos para el mes.');
-    } catch (err) {
-      await sendTelegram(chatId, `❌ Error: ${err.message}`);
-    }
-    return;
-  }
-
-  if (text === '/nueva') {
-    await clearHistory(telegramId);
-    await sendTelegram(chatId, '🔄 Conversación reiniciada. ¿En qué puedo ayudarte?');
-    return;
-  }
-
-  if (text.startsWith('/')) return;
+  // Sin comandos: todo se trata como conversación normal.
+  // /start (y similares) lo convertimos a un saludo para una UX mejor.
+  if (text === '/start') text = 'hola';
+  if (text.startsWith('/')) text = text.slice(1).trim();
 
   await sendTyping(chatId);
   try {
