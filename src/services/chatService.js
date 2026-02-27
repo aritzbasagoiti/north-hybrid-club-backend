@@ -107,6 +107,48 @@ function looksLikeTrainingLog(message) {
   return patterns.some((p) => p.test(m));
 }
 
+function detectPRQuery(message) {
+  const m = (message || '').toLowerCase().trim();
+  const isPR =
+    /\b(pr|récord|record|marca|máximo|maximo)\b/.test(m) ||
+    /\bcu[aá]nto\b/.test(m) ||
+    /\bcuanto\b/.test(m);
+
+  if (!isPR) return null;
+
+  const exercisePatterns = [];
+  let label = null;
+
+  if (m.includes('back squat') || m.includes('sentadilla')) {
+    label = 'back squat / sentadilla';
+    exercisePatterns.push('%back squat%', '%sentadilla%');
+  } else if (m.includes('front squat') || m.includes('sentadilla frontal')) {
+    label = 'front squat / sentadilla frontal';
+    exercisePatterns.push('%front squat%', '%sentadilla frontal%');
+  } else if (m.includes('deadlift') || m.includes('peso muerto')) {
+    label = 'deadlift / peso muerto';
+    exercisePatterns.push('%deadlift%', '%peso muerto%');
+  } else if (m.includes('bench') || m.includes('press banca') || m.includes('press de banca')) {
+    label = 'press banca';
+    exercisePatterns.push('%press banca%', '%press de banca%', '%bench%');
+  }
+
+  if (!label) return null;
+  return { label, exercisePatterns };
+}
+
+function detectWhatDoYouKnowQuery(message) {
+  const m = (message || '').toLowerCase();
+  return (
+    m.includes('que sabes de mi') ||
+    m.includes('qué sabes de mí') ||
+    m.includes('que recuerdas de mi') ||
+    m.includes('qué recuerdas de mí') ||
+    m.includes('que tienes guardado') ||
+    m.includes('qué tienes guardado')
+  );
+}
+
 function needsTrainingContext(message) {
   const keywords = [
     'ayer',
@@ -198,6 +240,21 @@ async function upsertUserProfile(userId, profile) {
   await supabase
     .from('user_profile')
     .upsert({ user_id: userId, profile, updated_at: new Date().toISOString() });
+}
+
+async function getBestWeightForExercise(userId, exercisePatterns) {
+  const orFilter = exercisePatterns.map((p) => `exercise.ilike.${p}`).join(',');
+  const { data, error } = await supabase
+    .from('training_logs')
+    .select('exercise, weight, reps, sets, created_at')
+    .eq('user_id', userId)
+    .not('weight', 'is', null)
+    .or(orFilter)
+    .order('weight', { ascending: false })
+    .limit(1);
+
+  if (error) throw error;
+  return (data && data[0]) || null;
 }
 
 async function updateProfileFromMessage({ userId, message, existingProfile }) {
@@ -313,6 +370,11 @@ async function saveMessage(userId, role, content) {
   });
 }
 
+async function saveConversationTurn(userId, userMessage, assistantMessage) {
+  await saveMessage(userId, 'user', userMessage);
+  await saveMessage(userId, 'assistant', assistantMessage);
+}
+
 /* =========================
    CLEAR HISTORY
 ========================= */
@@ -334,6 +396,41 @@ async function chat(telegramId, message) {
 
   const profile = await loadUserProfile(user.id);
   const profileBlock = formatProfileForPrompt(profile);
+
+  // Respuestas directas para preguntas de memoria/datos (evita alucinaciones)
+  if (detectWhatDoYouKnowQuery(normalizedMessage)) {
+    const known = [];
+    if (profile?.name) known.push(`- nombre: ${profile.name}`);
+    if (profile?.goal) known.push(`- objetivo: ${profile.goal}`);
+    if (profile?.level) known.push(`- nivel: ${profile.level}`);
+    if (profile?.injuries) known.push(`- lesiones/limitaciones: ${profile.injuries}`);
+    if (profile?.availability) known.push(`- disponibilidad: ${profile.availability}`);
+    if (profile?.preferences) known.push(`- preferencias: ${profile.preferences}`);
+
+    const reply = known.length
+      ? `Esto es lo que tengo guardado de ti ahora mismo:\n${known.join('\n')}`
+      : `Ahora mismo no tengo datos personales guardados tuyos (nombre/objetivo/lesiones/etc.).\nDime por ejemplo: "Me llamo ___, mi objetivo es ___ y tengo ___" y lo guardaré.`;
+
+    await saveConversationTurn(user.id, message, reply);
+    return reply;
+  }
+
+  const prQuery = detectPRQuery(normalizedMessage);
+  if (prQuery) {
+    try {
+      const best = await getBestWeightForExercise(user.id, prQuery.exercisePatterns);
+      const reply = best?.weight
+        ? `Tu mejor registro que tengo para ${prQuery.label} es ${best.weight}kg.`
+        : `No tengo ningún registro de ${prQuery.label} todavía.\nSi me escribes tu última marca (ej: "Back squat 3x5 con 100kg"), la guardo y desde ahí lo vamos siguiendo.`;
+
+      await saveConversationTurn(user.id, message, reply);
+      return reply;
+    } catch {
+      const reply = `Ahora mismo no puedo consultar tus registros. Inténtalo de nuevo en un minuto.`;
+      await saveConversationTurn(user.id, message, reply);
+      return reply;
+    }
+  }
 
   const clubContext = await getClubContextIfNeeded(normalizedMessage);
 
@@ -378,8 +475,7 @@ async function chat(telegramId, message) {
     completion.choices[0]?.message?.content ||
     'No pude generar respuesta.';
 
-  await saveMessage(user.id, 'user', message);
-  await saveMessage(user.id, 'assistant', reply);
+  await saveConversationTurn(user.id, message, reply);
 
   return reply;
 }
