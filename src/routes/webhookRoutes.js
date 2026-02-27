@@ -41,7 +41,9 @@ async function getTelegramFilePath(fileId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ file_id: fileId })
   });
+  if (!res.ok) throw new Error(`Telegram getFile HTTP ${res.status}`);
   const data = await res.json().catch(() => ({}));
+  if (data && data.ok === false) throw new Error(`Telegram getFile error: ${data.description || 'unknown'}`);
   const filePath = data?.result?.file_path;
   if (!filePath) throw new Error('No se pudo obtener file_path de Telegram');
   return filePath;
@@ -50,8 +52,11 @@ async function getTelegramFilePath(fileId) {
 async function downloadTelegramFileBuffer(filePath) {
   const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
   const res = await fetchWithRetry(url, { method: 'GET' });
+  if (!res.ok) throw new Error(`Telegram file download HTTP ${res.status}`);
   const ab = await res.arrayBuffer();
-  return Buffer.from(ab);
+  const buf = Buffer.from(ab);
+  if (!buf.length) throw new Error('Audio vacío (0 bytes)');
+  return buf;
 }
 
 async function sendTyping(chatId) {

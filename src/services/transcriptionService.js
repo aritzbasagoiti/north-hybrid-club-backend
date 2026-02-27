@@ -7,13 +7,33 @@ async function transcribeAudioBuffer(buffer, filename = 'audio.ogg', mimeType = 
   if (!process.env.OPENAI_API_KEY) {
     throw new Error('Falta OPENAI_API_KEY para transcribir audio');
   }
-  const file = await toFile(buffer, filename, mimeType ? { type: mimeType } : undefined);
-  const result = await openai.audio.transcriptions.create({
-    model: 'gpt-4o-mini-transcribe',
-    file
-  });
-  if (typeof result === 'string') return result;
-  return result.text || '';
+  const makeFile = () => toFile(buffer, filename, mimeType ? { type: mimeType } : undefined);
+
+  // Intento 1: modelo barato
+  {
+    const file = await makeFile();
+    const result = await openai.audio.transcriptions.create({
+      model: 'gpt-4o-mini-transcribe',
+      file,
+      language: 'es',
+      temperature: 0
+    });
+    const text = (typeof result === 'string' ? result : result.text) || '';
+    if (text.trim()) return text.trim();
+  }
+
+  // Fallback: Whisper (a veces transcribe mejor ciertos audios de Telegram)
+  {
+    const file = await makeFile();
+    const result = await openai.audio.transcriptions.create({
+      model: 'whisper-1',
+      file,
+      language: 'es',
+      temperature: 0
+    });
+    const text = (typeof result === 'string' ? result : result.text) || '';
+    return text.trim();
+  }
 }
 
 module.exports = { transcribeAudioBuffer };
