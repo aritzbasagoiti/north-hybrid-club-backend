@@ -798,8 +798,8 @@ async function chat(telegramId, message) {
     if (profile?.preferences) known.push(`- preferencias: ${profile.preferences}`);
 
     const reply = known.length
-      ? `Sí. Esto es lo que tengo guardado de ti ahora mismo:\n${known.join('\n')}`
-      : `Aún no tengo datos personales tuyos guardados.\nDime por ejemplo: "Me llamo ___, mi objetivo es ___ y tengo ___" y lo guardaré.`;
+      ? `Perfecto. Esto es lo que recuerdo de ti ahora mismo:\n${known.join('\n')}`
+      : `Todavía no tengo datos personales tuyos guardados.\nDime por ejemplo: "Me llamo ___, mi objetivo es ___ y tengo ___" y lo guardaré.`;
 
     await saveConversationTurn(user.id, message, reply);
     return reply;
@@ -827,14 +827,13 @@ async function chat(telegramId, message) {
       if (profile?.preferences) known.push(`- preferencias: ${profile.preferences}`);
 
       const pieces = [];
-      if (known.length) pieces.push(`Sí. En tu perfil tengo:\n${known.join('\n')}`);
+      if (known.length) pieces.push(`Sí. De ti tengo esto apuntado:\n${known.join('\n')}`);
       if (lastLog?.created_at) {
-        const date = new Date(lastLog.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
-        pieces.push(`También tengo entrenamientos guardados (el último registro es del ${date}).`);
+        pieces.push(`Y sí: también tengo entrenamientos guardados.`);
       }
 
       const reply = pieces.length
-        ? pieces.join('\n\n') + `\n\nSi me dices qué dato exacto buscas (por ejemplo: "mi última carrera" o "mi sentadilla"), te lo saco.`
+        ? pieces.join('\n\n') + `\n\nDime qué dato exacto buscas (por ejemplo: "mi última carrera" o "mi sentadilla") y te lo saco.`
         : `Creo que todavía no tengo datos guardados tuyos (ni perfil ni entrenamientos).\nPásame el dato otra vez (por ejemplo: "Back squat 3x5 con 100kg" o "me llamo ___ y mi objetivo es ___") y lo guardo para próximas veces.`;
 
       await saveConversationTurn(user.id, message, reply);
