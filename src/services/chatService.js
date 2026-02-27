@@ -33,6 +33,30 @@ function normalizeTextForHash(text) {
     .toLowerCase();
 }
 
+function titleCaseName(name) {
+  return String(name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function extractNameFromMessage(message) {
+  const text = String(message || '').trim();
+  if (!text) return null;
+
+  // Captura: "me llamo Aritz", "mi nombre es Aritz Basagoiti"
+  const re = /\b(?:me llamo|mi nombre es)\s+([a-záéíóúüñ]+(?:\s+[a-záéíóúüñ]+){0,2})\b/i;
+  const m = text.match(re);
+  if (!m || !m[1]) return null;
+
+  const candidate = titleCaseName(m[1]);
+  // Evita nombres demasiado cortos o palabras raras
+  if (candidate.length < 2) return null;
+  return candidate;
+}
+
 /* =========================
    SYSTEM PROMPT
 ========================= */
@@ -705,6 +729,18 @@ async function chat(telegramId, message) {
   // memoria persistente
   let profile = await loadUserProfile(user.id);
   const profileBlock = formatProfileForPrompt(profile);
+
+  // Guardado determinista del nombre (sin depender de GPT ni del routing)
+  const extractedName = extractNameFromMessage(normalizedMessage);
+  if (extractedName && extractedName !== profile?.name) {
+    const nextProfile = { ...(profile || {}), name: extractedName };
+    try {
+      await upsertUserProfile(user.id, nextProfile);
+      profile = nextProfile;
+    } catch {
+      // no bloqueamos el chat por fallo de persistencia
+    }
+  }
 
   const session = profile?.session || {};
   const sessionBlock = formatSessionForPrompt(session);
